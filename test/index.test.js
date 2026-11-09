@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { handleCommand, handleCallbackQuery, nextSyncSlot } from "../src/index.js";
+import worker, { handleCommand, handleCallbackQuery, nextSyncSlot, VERSION } from "../src/index.js";
 
 const env = {}; // no tokens — sendTelegram must not crash
 const chatId = 7933991754;
@@ -432,6 +432,22 @@ test("nextSyncSlot at 23:50 Colombo is tomorrow 05:47", () => {
   const slot = nextSyncSlot(Date.UTC(2026, 10, 9, 18, 20));
   assert.equal(slot.dayOffset, 1);
   assert.equal(slot.slot, 5 * 60 + 47);
+});
+
+test("/about shows the version, host and sync bots", async () => {
+  const result = await handleCommand(env, chatId, "/about");
+  assert.match(result.text, new RegExp(`Version: ${VERSION}`));
+  assert.match(result.text, /Vercel/);
+  assert.match(result.text, /schkoss_logs_playlist_bot/);
+  assert.match(result.text, /Cool phonks/);
+  assert.match(result.text, /Trending Phonk/);
+  assert.match(result.text, /botstar phonk playlist/);
+  assert.match(result.text, /05:47 \/ 11:47 \/ 17:47 \/ 23:47/);
+});
+
+test("/help lists /about", async () => {
+  const result = await handleCommand(env, chatId, "/help");
+  assert.match(result.text, /\/about/);
 });
 
 test("/next reports the next scheduled sync time", async () => {

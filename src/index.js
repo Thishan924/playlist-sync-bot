@@ -40,7 +40,9 @@
 // v0.3.4 adds /runs: the last 5 workflow runs of the picked sync bot
 // (success / fail, when in Sri Lanka time, how long, Scheduled vs
 // Manual, run page link). /status stays as the latest run only.
-export const VERSION = "0.3.4";
+// v0.3.5 adds /about: version, host, bot identity, sync bots and
+// schedule in one place.
+export const VERSION = "0.3.5";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Each workflow takes a `dry_run` boolean input on
@@ -93,6 +95,7 @@ const HELP_TEXT = [
   `/ping — basic reachability check (GitHub API + Telegram, from the Worker)`,
   `/github — GitHub service status (up / down, active incidents)`,
   `/next — next scheduled sync time (05:47 / 11:47 / 17:47 / 23:47)`,
+  `/about — about this bot (version, host, sync bots)`,
   ``,
   `Sync bots:`,
   `- Cool phonks`,
@@ -616,6 +619,23 @@ function handleNext() {
   return reply(lines.join("\n"));
 }
 
+function handleAbout() {
+  const lines = [
+    `Playlist sync control bot — about:`,
+    ``,
+    `- Version: ${VERSION}`,
+    `- Host: Vercel (serverless webhook)`,
+    `- Bot: @schkoss_logs_playlist_bot ("Playlist sync bot logs")`,
+    ``,
+    `Sync bots:`,
+    ...SYNC_BOTS.map((b) => `- ${b.name} (${b.repo})`),
+    ``,
+    `Schedule: 05:47 / 11:47 / 17:47 / 23:47 (Sri Lanka time, dry runs).`,
+    `Commands: /sync /status /runs /ping /github /next /about /help`,
+  ];
+  return reply(lines.join("\n"));
+}
+
 async function handleSync(env, chatId, botArg) {
   const picked = botArg ? findBotByArg(botArg) : null;
   if (botArg && !picked) {
@@ -705,6 +725,7 @@ export async function handleCommand(env, chatId, text) {
   if (base === "/ping") return handlePing(env);
   if (base === "/github") return handleGithub(env);
   if (base === "/next") return handleNext();
+  if (base === "/about") return handleAbout();
   if (base === "/list") {
     return reply(
       "No /list command — there are too many songs to list, so it was left out on purpose.",
