@@ -1,0 +1,27 @@
+name = "playlist-sync-bot"
+main = "src/index.js"
+compatibility_date = "2026-11-09"
+workers_dev = true
+
+# No secrets in this file. Ever.
+# Set these with `wrangler secret put <NAME>`:
+#   TELEGRAM_BOT_TOKEN  - from @BotFather on Telegram
+#   GITHUB_PAT          - GitHub PAT for workflow_dispatch + reading
+#     private-repo runs (Actions: read + write on the thishan2012 repos).
+#     The bot's GitHub App cannot reach those repos (different owner).
+# Optional:
+#   TELEGRAM_WEBHOOK_SECRET - if set, Telegram must send it as X-Telegram-Bot-Api-Secret-Token
+#
+# KV (remember last picked sync bot): create it first, then add the block:
+#   wrangler kv namespace create BOT_KV
+#   [[kv_namespaces]]
+#   binding = "BOT_KV"
+#   id = "<the id wrangler prints>"
+# No KV binding -> the bot still works, it just asks which bot every time.
+#
+# v0.1.0 BASE: /start /help /sync /status /ping (basic). No /list.
+# Later: /ping with last-run status/duration, dispatch timing,
+# YouTube / Spotify reachability.
+#
+# Allowed chat ID 7933991754 is hardcoded in src/index.js (not a Secret).
+# Bot token: create a new bot with @BotFather — not the NextDNS bot's token.
