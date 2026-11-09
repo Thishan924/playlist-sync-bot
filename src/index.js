@@ -29,7 +29,9 @@
 // Allowed chat ID is hardcoded in code (user's choice, not a Secret):
 //   7933991754 — same chat as the NextDNS bot.
 
-export const VERSION = "0.3.0";
+// v0.3.1 adds /github: GitHub service status (githubstatus.com summary,
+// public, no auth) — overall status + active incidents.
+export const VERSION = "0.3.1";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Cool phonks + Trending are wired (both sync.yml, both take
@@ -72,6 +74,7 @@ const HELP_TEXT = [
   `/sync — pick a sync bot, then Dry run / Real run (real asks to confirm)`,
   `/status — last run of the picked sync bot (Added / Skipped / Failed is on the run page)`,
   `/ping — basic reachability check (GitHub API + Telegram, from the Worker)`,
+  `/github — GitHub service status (up / down, active incidents)`,
   ``,
   `Sync bots:`,
   `- Cool phonks`,
@@ -457,6 +460,42 @@ async function handlePing(env) {
   return reply(lines.join("\n"));
 }
 
+// --- GitHub service status ------------------------------------------------
+// Public endpoint, no auth: https://www.githubstatus.com/api/v2/summary.json
+// returns { status: { indicator, description }, incidents: [...] } —
+// overall status plus any active incidents, in one call.
+async function handleGithub(env) {
+  const url = "https://www.githubstatus.com/api/v2/summary.json";
+  try {
+    const res = await httpFetch(env, url, {
+      signal: AbortSignal.timeout(timeoutMs(env, 5000)),
+    });
+    if (!res.ok) {
+      return reply(`GitHub status: githubstatus.com returned HTTP ${res.status}.`);
+    }
+    const data = await res.json();
+    const description = data?.status?.description || "unknown";
+    const lines = ["GitHub status:", `- Overall: ${description}`];
+    const incidents = Array.isArray(data?.incidents) ? data.incidents : [];
+    if (incidents.length === 0) {
+      lines.push("- No active incidents.");
+    } else {
+      for (const inc of incidents.slice(0, 5)) {
+        lines.push(
+          `- ⚠️ ${inc.name || "Incident"} — ${inc.status || "?"}${inc.impact ? ` (${inc.impact})` : ""}`,
+        );
+      }
+    }
+    lines.push("Source: githubstatus.com");
+    lines.push(`Version: ${VERSION}`);
+    return reply(lines.join("\n"));
+  } catch (e) {
+    return reply(
+      `GitHub status: could not reach githubstatus.com — ${e.message || "fetch failed"}.`,
+    );
+  }
+}
+
 async function handleSync(env, chatId, botArg) {
   const picked = botArg ? findBotByArg(botArg) : null;
   if (botArg && !picked) {
@@ -528,6 +567,7 @@ export async function handleCommand(env, chatId, text) {
   if (base === "/sync") return handleSync(env, chatId, arg);
   if (base === "/status") return handleStatus(env, chatId, arg);
   if (base === "/ping") return handlePing(env);
+  if (base === "/github") return handleGithub(env);
   if (base === "/list") {
     return reply(
       "No /list command — there are too many songs to list, so it was left out on purpose.",

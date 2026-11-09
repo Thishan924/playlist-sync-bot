@@ -207,6 +207,60 @@ test("/status reports the last run from the GitHub API (stubbed)", async () => {
   }
 });
 
+test("/github reports All Systems Operational with no incidents (stubbed)", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /githubstatus\.com\/api\/v2\/summary\.json/);
+    return new Response(
+      JSON.stringify({
+        status: { indicator: "none", description: "All Systems Operational" },
+        incidents: [],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await handleCommand(env, chatId, "/github");
+    assert.match(result.text, /All Systems Operational/);
+    assert.match(result.text, /No active incidents/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("/github lists an active incident (stubbed)", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(
+      JSON.stringify({
+        status: { indicator: "minor", description: "Partial System Outage" },
+        incidents: [{ name: "Actions delays", status: "investigating", impact: "minor" }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await handleCommand(env, chatId, "/github");
+    assert.match(result.text, /Partial System Outage/);
+    assert.match(result.text, /Actions delays/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("/github fetch failure reports cleanly", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("boom");
+  };
+  try {
+    const result = await handleCommand(env, chatId, "/github");
+    assert.match(result.text, /could not reach githubstatus\.com/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test("callback_query with unknown data returns 200, no crash", async () => {
   const result = await handleCallbackQuery(env, chatId, {
     id: "cb6",
