@@ -31,17 +31,27 @@
 
 // v0.3.2 adds /next: next scheduled sync time (sync.yml cron
 // '17 */6 * * *' UTC = 05:47 / 11:47 / 17:47 / 23:47 Sri Lanka time).
-export const VERSION = "0.3.2";
+// v0.3.3 wires the Spotify-scour bot (repo thishan2012/zq9-void-200-s2y,
+// playlist "botstar phonk playlist") and sends each workflow only the
+// inputs it defines (screenshots, 2026-11-09): Cool phonks takes
+// dry_run (+ stats, not sent); Trending takes dry_run + reset_db;
+// scour takes dry_run (+ max_tracks / request_delay / free_search_pause,
+// not sent). reset_db is always "none" — never anything else.
+export const VERSION = "0.3.3";
 const ALLOWED_CHAT_ID = "7933991754";
 
-// Sync bots. Cool phonks + Trending are wired (both sync.yml, both take
-// a `dry_run` boolean input on workflow_dispatch — verified for Trending
-// in thishan2012/-zq9-void-200/.github/workflows/sync.yml; Cool phonks
-// uses the same file name, same input is assumed and a dispatch error
-// is reported back instead of guessed at).
-// Spotify-scour bot: repo + workflow file are NOT known yet, so it is
-// listed but cannot be dispatched until the user gives them. It blocks
-// only bot #3, not the base.
+// Sync bots. Each workflow takes a `dry_run` boolean input on
+// workflow_dispatch; only Trending also defines `reset_db`, so only it
+// gets reset_db: "none" (verified from the Run workflow dialogs,
+// 2026-11-09). Sending an input a workflow does not define can fail
+// the dispatch, so each bot lists only its own extra inputs.
+//   - Cool phonks: thishan2012/Spotify-yt-playlist-sync-testing,
+//     sync.yml, inputs dry_run + stats.
+//   - Trending: thishan2012/-zq9-void-200, sync.yml,
+//     inputs dry_run + reset_db.
+//   - Scour ("botstar phonk playlist"): thishan2012/zq9-void-200-s2y,
+//     sync.yml, inputs dry_run + max_tracks + request_delay +
+//     free_search_pause.
 const SYNC_BOTS = [
   {
     id: "cool",
@@ -49,6 +59,7 @@ const SYNC_BOTS = [
     repo: "thishan2012/Spotify-yt-playlist-sync-testing",
     workflow: "sync.yml",
     ref: "main",
+    extraInputs: {},
   },
   {
     id: "trending",
@@ -56,13 +67,15 @@ const SYNC_BOTS = [
     repo: "thishan2012/-zq9-void-200",
     workflow: "sync.yml",
     ref: "main",
+    extraInputs: { reset_db: "none" },
   },
   {
     id: "scour",
-    name: "Spotify-scour bot",
-    repo: null,
-    workflow: null,
+    name: "botstar phonk playlist",
+    repo: "thishan2012/zq9-void-200-s2y",
+    workflow: "sync.yml",
     ref: "main",
+    extraInputs: {},
   },
 ];
 
@@ -80,7 +93,7 @@ const HELP_TEXT = [
   `Sync bots:`,
   `- Cool phonks`,
   `- Trending Phonk/funk songs`,
-  `- Spotify-scour bot (repo / workflow not set yet — pick it and the bot will say so)`,
+  `- botstar phonk playlist (Spotify-scour bot)`,
   ``,
   `The bot remembers your last picked bot, so the next /sync goes straight`,
   `to it — send /sync and tap "Change bot" to pick another one.`,
@@ -371,7 +384,11 @@ async function dispatchSync(env, bot, dryRun) {
       headers: { ...githubHeaders(env), "content-type": "application/json" },
       body: JSON.stringify({
         ref: bot.ref || "main",
-        inputs: { dry_run: dryRun ? "true" : "false", reset_db: "none" },
+        // Only the inputs this workflow defines: dry_run for all,
+        // plus bot.extraInputs (reset_db "none" — Trending only).
+        // reset_db is never anything but "none": it is an emergency
+        // database reset and must never be offered or sent otherwise.
+        inputs: { dry_run: dryRun ? "true" : "false", ...(bot.extraInputs || {}) },
       }),
       signal: AbortSignal.timeout(dispatchTimeoutMs(env)),
     });

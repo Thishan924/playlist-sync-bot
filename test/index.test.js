@@ -81,9 +81,13 @@ test("/sync cool goes straight to Dry / Real choice", async () => {
   assert.ok(labels.includes("sync:real:cool"));
 });
 
-test("/sync scour says it is not set up yet", async () => {
+test("/sync scour goes straight to Dry / Real choice", async () => {
   const result = await handleCommand(env, chatId, "/sync scour");
-  assert.match(result.text, /not set up yet/);
+  assert.match(result.text, /botstar phonk playlist/);
+  assert.match(result.text, /Dry run/);
+  const labels = result.replyMarkup.inline_keyboard.flat().map((b) => b.callback_data);
+  assert.ok(labels.includes("sync:dry:scour"));
+  assert.ok(labels.includes("sync:real:scour"));
 });
 
 test("pick callback saves last bot in KV, next /sync reuses it", async () => {
@@ -140,6 +144,54 @@ test("dry dispatch sends workflow_dispatch with dry_run=true + User-Agent", asyn
     const body = JSON.parse(calls[0].opts.body);
     assert.equal(body.inputs.dry_run, "true");
     assert.equal(body.inputs.reset_db, "none");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("cool dispatch sends dry_run only — no reset_db (its workflow has none)", async () => {
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const result = await handleCallbackQuery(
+      { GITHUB_PAT: "fake-pat" },
+      chatId,
+      { id: "cb3b", data: "sync:dry:cool", message: { chat: { id: chatId } } },
+    );
+    assert.match(result.text, /Dry run dispatched/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /thishan2012\/Spotify-yt-playlist-sync-testing\/actions\/workflows\/sync\.yml\/dispatches/);
+    const body = JSON.parse(calls[0].opts.body);
+    assert.equal(body.inputs.dry_run, "true");
+    assert.equal("reset_db" in body.inputs, false);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("scour dispatch sends dry_run only to zq9-void-200-s2y", async () => {
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const result = await handleCallbackQuery(
+      { GITHUB_PAT: "fake-pat" },
+      chatId,
+      { id: "cb3c", data: "sync:dry:scour", message: { chat: { id: chatId } } },
+    );
+    assert.match(result.text, /Dry run dispatched/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /thishan2012\/zq9-void-200-s2y\/actions\/workflows\/sync\.yml\/dispatches/);
+    const body = JSON.parse(calls[0].opts.body);
+    assert.equal(body.inputs.dry_run, "true");
+    assert.equal("reset_db" in body.inputs, false);
   } finally {
     globalThis.fetch = origFetch;
   }
