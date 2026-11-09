@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { handleCommand, handleCallbackQuery } from "../src/index.js";
+import worker, { handleCommand, handleCallbackQuery, nextSyncSlot } from "../src/index.js";
 
 const env = {}; // no tokens — sendTelegram must not crash
 const chatId = 7933991754;
@@ -259,6 +259,27 @@ test("/github fetch failure reports cleanly", async () => {
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+test("nextSyncSlot at 12:00 Colombo is today 17:47", () => {
+  // 12:00 Colombo = 06:30 UTC.
+  const slot = nextSyncSlot(Date.UTC(2026, 10, 9, 6, 30));
+  assert.equal(slot.dayOffset, 0);
+  assert.equal(slot.slot, 17 * 60 + 47);
+});
+
+test("nextSyncSlot at 23:50 Colombo is tomorrow 05:47", () => {
+  // 23:50 Colombo = 18:20 UTC.
+  const slot = nextSyncSlot(Date.UTC(2026, 10, 9, 18, 20));
+  assert.equal(slot.dayOffset, 1);
+  assert.equal(slot.slot, 5 * 60 + 47);
+});
+
+test("/next reports the next scheduled sync time", async () => {
+  const result = await handleCommand(env, chatId, "/next");
+  assert.match(result.text, /Next scheduled sync/);
+  assert.match(result.text, /05:47 \/ 11:47 \/ 17:47 \/ 23:47/);
+  assert.match(result.text, /dry runs/);
 });
 
 test("callback_query with unknown data returns 200, no crash", async () => {

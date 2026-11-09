@@ -73,7 +73,7 @@ test("GET returns the health text with the version", async () => {
   assert.equal(res.statusCode, 200);
   assert.match(res.body, /Playlist sync control bot is running/);
   assert.match(res.body, new RegExp(`v${VERSION}`));
-  assert.equal(VERSION, "0.3.1");
+  assert.equal(VERSION, "0.3.2");
 });
 
 test("default export GET also returns the health text", async () => {

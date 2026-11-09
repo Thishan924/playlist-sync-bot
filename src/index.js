@@ -29,9 +29,9 @@
 // Allowed chat ID is hardcoded in code (user's choice, not a Secret):
 //   7933991754 — same chat as the NextDNS bot.
 
-// v0.3.1 adds /github: GitHub service status (githubstatus.com summary,
-// public, no auth) — overall status + active incidents.
-export const VERSION = "0.3.1";
+// v0.3.2 adds /next: next scheduled sync time (sync.yml cron
+// '17 */6 * * *' UTC = 05:47 / 11:47 / 17:47 / 23:47 Sri Lanka time).
+export const VERSION = "0.3.2";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Cool phonks + Trending are wired (both sync.yml, both take
@@ -75,6 +75,7 @@ const HELP_TEXT = [
   `/status — last run of the picked sync bot (Added / Skipped / Failed is on the run page)`,
   `/ping — basic reachability check (GitHub API + Telegram, from the Worker)`,
   `/github — GitHub service status (up / down, active incidents)`,
+  `/next — next scheduled sync time (05:47 / 11:47 / 17:47 / 23:47)`,
   ``,
   `Sync bots:`,
   `- Cool phonks`,
@@ -496,6 +497,48 @@ async function handleGithub(env) {
   }
 }
 
+// --- Next scheduled sync --------------------------------------------------
+// The sync schedule (sync.yml cron '17 */6 * * *' UTC): 05:47, 11:47,
+// 17:47, 23:47 Sri Lanka time, 4 runs a day. Sri Lanka is UTC+5:30
+// year-round (no DST), so the slots are fixed. Scheduled runs are dry
+// runs unless SYNC_ENABLED='true', and they sometimes start late — so
+// this is the scheduled time, not a promise.
+const SYNC_SLOTS_MINUTES = [5 * 60 + 47, 11 * 60 + 47, 17 * 60 + 47, 23 * 60 + 47];
+
+export function nextSyncSlot(nowMs = Date.now()) {
+  const colombo = new Date(nowMs + 5.5 * 60 * 60 * 1000);
+  const minsNow = colombo.getUTCHours() * 60 + colombo.getUTCMinutes();
+  for (const slot of SYNC_SLOTS_MINUTES) {
+    if (slot > minsNow) return { dayOffset: 0, slot };
+  }
+  return { dayOffset: 1, slot: SYNC_SLOTS_MINUTES[0] };
+}
+
+function formatSlot(slot) {
+  const h = Math.floor(slot / 60);
+  const m = slot % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function handleNext() {
+  const nowMs = Date.now();
+  const colombo = new Date(nowMs + 5.5 * 60 * 60 * 1000);
+  const minsNow = colombo.getUTCHours() * 60 + colombo.getUTCMinutes();
+  const { dayOffset, slot } = nextSyncSlot(nowMs);
+  const diffMin = dayOffset === 0 ? slot - minsNow : 1440 - minsNow + slot;
+  const h = Math.floor(diffMin / 60);
+  const m = diffMin % 60;
+  const when = dayOffset === 0 ? "today" : "tomorrow";
+  const lines = [
+    `Next scheduled sync: ${when} ${formatSlot(slot)} (in ${h}h ${m}m).`,
+    `Daily slots (Sri Lanka time): 05:47 / 11:47 / 17:47 / 23:47.`,
+    `Scheduled runs are dry runs (preview only) — real runs only via /sync.`,
+    `Runs sometimes start late, so this is the scheduled time.`,
+    `Version: ${VERSION}`,
+  ];
+  return reply(lines.join("\n"));
+}
+
 async function handleSync(env, chatId, botArg) {
   const picked = botArg ? findBotByArg(botArg) : null;
   if (botArg && !picked) {
@@ -568,6 +611,7 @@ export async function handleCommand(env, chatId, text) {
   if (base === "/status") return handleStatus(env, chatId, arg);
   if (base === "/ping") return handlePing(env);
   if (base === "/github") return handleGithub(env);
+  if (base === "/next") return handleNext();
   if (base === "/list") {
     return reply(
       "No /list command — there are too many songs to list, so it was left out on purpose.",
