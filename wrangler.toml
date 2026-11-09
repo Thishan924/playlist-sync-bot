@@ -23,5 +23,8 @@ workers_dev = true
 # Later: /ping with last-run status/duration, dispatch timing,
 # YouTube / Spotify reachability.
 #
+# v0.3.0 adds api/webhook.js (Vercel serverless). Workers behaviour is
+# unchanged; see README "Option C" for the Vercel setup.
+#
 # Allowed chat ID 7933991754 is hardcoded in src/index.js (not a Secret).
 # Bot token: create a new bot with @BotFather — not the NextDNS bot's token.

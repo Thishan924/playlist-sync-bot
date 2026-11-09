@@ -14,6 +14,12 @@
 // process (for hosts like HidenCloud that run Node, not Workers). The
 // shared update handler below (handleUpdate) is used by both entries,
 // so the commands behave the same on either host.
+// v0.3.0 adds api/webhook.js: the same bot as a Vercel serverless function
+// (webhook, no polling). Storage is now a small shim: Workers KV when
+// present, Upstash Redis REST when its env vars are set, in-memory
+// otherwise (no persistence — the bot just asks every time). Fetch
+// timeouts are capped by env.FETCH_TIMEOUT_MS (Vercel sets 8000, inside
+// the Hobby 10 s limit). Workers and polling behaviour are unchanged.
 // Secrets come only from Worker env (wrangler secret put):
 //   TELEGRAM_BOT_TOKEN
 //   GITHUB_PAT — GitHub PAT for workflow_dispatch + reading private-repo
@@ -23,7 +29,7 @@
 // Allowed chat ID is hardcoded in code (user's choice, not a Secret):
 //   7933991754 — same chat as the NextDNS bot.
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Cool phonks + Trending are wired (both sync.yml, both take
@@ -117,19 +123,91 @@ function botLines() {
   ).join("\n");
 }
 
-// --- Remembered bot (Cloudflare KV) --------------------------------------
-// Key: `last-sync-bot:<chatId>` -> JSON { id }. KV is best-effort only:
-// a missing binding, a failed read, or a failed write must never break
+// --- Remembered bot (storage) ---------------------------------------------
+// Key: `last-sync-bot:<chatId>` -> JSON { id }. Storage is best-effort only:
+// a missing backend, a failed read, or a failed write must never break
 // a command — callers fall back to buttons.
+//
+// Backends, in order:
+//   1. env.BOT_KV — Cloudflare KV (Workers) or the file KV (polling entry).
+//      Same get/put shape, so both keep working unchanged.
+//   2. Upstash Redis REST — when UPSTASH_REDIS_REST_URL +
+//      UPSTASH_REDIS_REST_TOKEN are set (Vercel). Optional; no Upstash
+//      account is needed to run the bot.
+//   3. In-memory Map — no persistence. A fresh process has nothing
+//      remembered, so the bot just asks which bot every time. Correct,
+//      just less convenient.
+// The in-memory store is created fresh per call on purpose: the Workers
+// contract is "no KV binding -> always ask", and a process-wide Map would
+// silently change that for the Workers and test paths. (The Vercel entry
+// passes its own module-level memory store as BOT_KV instead, so warm
+// containers there do remember the pick.)
 
 function lastBotKey(chatId) {
   return `last-sync-bot:${chatId}`;
 }
 
+export function createMemoryStore() {
+  const store = new Map();
+  return {
+    get: async (k) => store.get(k) ?? null,
+    put: async (k, v) => {
+      store.set(k, v);
+    },
+  };
+}
+
+// Upstash Redis REST API: GET /get/<key> -> {"result": <string|null>},
+// GET /set/<key>/<value> -> {"result": "OK"}. Both need
+// `Authorization: Bearer <token>`. Values here are tiny JSON strings, so
+// URL-encoding them is fine. Any failure means "nothing remembered".
+function createUpstashStore(env) {
+  const base = String(env.UPSTASH_REDIS_REST_URL).replace(/\/+$/, "");
+  const token = env.UPSTASH_REDIS_REST_TOKEN;
+  async function call(path) {
+    const res = await httpFetch(env, `${base}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs(env, 5000)),
+    });
+    if (!res.ok) throw new Error(`Upstash HTTP ${res.status}`);
+    return res.json();
+  }
+  return {
+    get: async (key) => {
+      try {
+        const data = await call(`/get/${encodeURIComponent(key)}`);
+        return data && typeof data.result === "string" ? data.result : null;
+      } catch {
+        return null;
+      }
+    },
+    put: async (key, value) => {
+      try {
+        await call(`/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`);
+      } catch (e) {
+        console.log("[upstash] put failed:", e.message);
+      }
+    },
+  };
+}
+
+function getStore(env) {
+  if (
+    env.BOT_KV &&
+    typeof env.BOT_KV.get === "function" &&
+    typeof env.BOT_KV.put === "function"
+  ) {
+    return env.BOT_KV;
+  }
+  if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+    return createUpstashStore(env);
+  }
+  return createMemoryStore();
+}
+
 async function loadLastBot(env, chatId) {
   try {
-    if (!env.BOT_KV || typeof env.BOT_KV.get !== "function") return null;
-    const raw = await env.BOT_KV.get(lastBotKey(chatId));
+    const raw = await getStore(env).get(lastBotKey(chatId));
     if (!raw) return null;
     const saved = JSON.parse(raw);
     if (!saved || typeof saved.id !== "string") return null;
@@ -141,12 +219,26 @@ async function loadLastBot(env, chatId) {
 
 async function saveLastBot(env, chatId, bot) {
   try {
-    if (!env.BOT_KV || typeof env.BOT_KV.put !== "function") return;
     if (!bot || !bot.id) return;
-    await env.BOT_KV.put(lastBotKey(chatId), JSON.stringify({ id: bot.id }));
+    await getStore(env).put(lastBotKey(chatId), JSON.stringify({ id: bot.id }));
   } catch (e) {
     console.log("[kv] save failed:", e.message);
   }
+}
+
+// Fetch timeouts: env.FETCH_TIMEOUT_MS caps them. Vercel Hobby kills the
+// function at 10 s, so the Vercel entry sets 8000 — a slow GitHub call then
+// returns a clean error reply instead of a hard kill. Workers keeps the
+// defaults below.
+function timeoutMs(env, def) {
+  const v = Number(env && env.FETCH_TIMEOUT_MS);
+  if (Number.isFinite(v) && v > 0) return Math.min(v, def);
+  return def;
+}
+
+// Exported for tests: the dispatch timeout in effect for this env.
+export function dispatchTimeoutMs(env) {
+  return timeoutMs(env, 15000);
 }
 
 // Fetch indirection: env.FETCH overrides the global fetch when set.
@@ -277,7 +369,7 @@ async function dispatchSync(env, bot, dryRun) {
         ref: bot.ref || "main",
         inputs: { dry_run: dryRun ? "true" : "false", reset_db: "none" },
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(dispatchTimeoutMs(env)),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -299,7 +391,7 @@ async function lastRun(env, bot) {
   try {
     const res = await httpFetch(env, url, {
       headers: githubHeaders(env),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(timeoutMs(env, 10000)),
     });
     if (!res.ok) {
       if (res.status === 404) {
@@ -334,7 +426,7 @@ async function lastRun(env, bot) {
 async function pingOne(url, env) {
   const start = Date.now();
   try {
-    const res = await httpFetch(env, url, { method: "GET", signal: AbortSignal.timeout(5000) });
+    const res = await httpFetch(env, url, { method: "GET", signal: AbortSignal.timeout(timeoutMs(env, 5000)) });
     await res.text().catch(() => {});
     return { url, ok: true, status: res.status, ms: Date.now() - start };
   } catch (e) {
