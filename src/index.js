@@ -10,6 +10,10 @@
 //   - Later features, NOT in this base: /ping with last-run status /
 //     duration, dispatch response time, YouTube / Spotify reachability.
 //     Those go in after the base is live and tested.
+// v0.2.0 adds src/polling.js: the same bot as a Node.js long-polling
+// process (for hosts like HidenCloud that run Node, not Workers). The
+// shared update handler below (handleUpdate) is used by both entries,
+// so the commands behave the same on either host.
 // Secrets come only from Worker env (wrangler secret put):
 //   TELEGRAM_BOT_TOKEN
 //   GITHUB_PAT — GitHub PAT for workflow_dispatch + reading private-repo
@@ -19,7 +23,7 @@
 // Allowed chat ID is hardcoded in code (user's choice, not a Secret):
 //   7933991754 — same chat as the NextDNS bot.
 
-const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Cool phonks + Trending are wired (both sync.yml, both take
@@ -145,6 +149,14 @@ async function saveLastBot(env, chatId, bot) {
   }
 }
 
+// Fetch indirection: env.FETCH overrides the global fetch when set.
+// The Workers entry never sets it; the polling entry (and tests) pass
+// their own fetch, so no Telegram/GitHub call escapes the stub.
+function httpFetch(env, url, opts) {
+  const f = (env && env.FETCH) || fetch;
+  return f(url, opts);
+}
+
 // --- Telegram ------------------------------------------------------------
 
 async function sendTelegram(env, chatId, text, replyMarkup) {
@@ -154,7 +166,8 @@ async function sendTelegram(env, chatId, text, replyMarkup) {
   }
   const body = { chat_id: chatId, text };
   if (replyMarkup) body.reply_markup = replyMarkup;
-  const res = await fetch(
+  const res = await httpFetch(
+    env,
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
     {
       method: "POST",
@@ -169,7 +182,8 @@ async function sendTelegram(env, chatId, text, replyMarkup) {
 async function answerCallbackQuery(env, callbackQueryId, text) {
   if (!env.TELEGRAM_BOT_TOKEN || !callbackQueryId) return false;
   try {
-    const res = await fetch(
+    const res = await httpFetch(
+      env,
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
       {
         method: "POST",
@@ -256,7 +270,7 @@ async function dispatchSync(env, bot, dryRun) {
     `https://api.github.com/repos/${bot.repo}/actions/workflows/` +
     `${encodeURIComponent(bot.workflow)}/dispatches`;
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(env, url, {
       method: "POST",
       headers: { ...githubHeaders(env), "content-type": "application/json" },
       body: JSON.stringify({
@@ -283,7 +297,7 @@ async function lastRun(env, bot) {
     `https://api.github.com/repos/${bot.repo}/actions/workflows/` +
     `${encodeURIComponent(bot.workflow)}/runs?per_page=1`;
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(env, url, {
       headers: githubHeaders(env),
       signal: AbortSignal.timeout(10000),
     });
@@ -317,10 +331,10 @@ async function lastRun(env, bot) {
 // Worker -> Telegram, ms + HTTP status. Last-run status/duration,
 // dispatch timing and YouTube/Spotify reachability are later features.
 
-async function pingOne(url) {
+async function pingOne(url, env) {
   const start = Date.now();
   try {
-    const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(5000) });
+    const res = await httpFetch(env, url, { method: "GET", signal: AbortSignal.timeout(5000) });
     await res.text().catch(() => {});
     return { url, ok: true, status: res.status, ms: Date.now() - start };
   } catch (e) {
@@ -328,10 +342,10 @@ async function pingOne(url) {
   }
 }
 
-async function handlePing() {
+async function handlePing(env) {
   const targets = ["https://api.github.com", "https://api.telegram.org"];
   const results = [];
-  for (const url of targets) results.push(await pingOne(url));
+  for (const url of targets) results.push(await pingOne(url, env));
   const lines = ["Ping (basic, from the Worker edge):"];
   for (const r of results) {
     lines.push(
@@ -421,7 +435,7 @@ export async function handleCommand(env, chatId, text) {
   }
   if (base === "/sync") return handleSync(env, chatId, arg);
   if (base === "/status") return handleStatus(env, chatId, arg);
-  if (base === "/ping") return handlePing();
+  if (base === "/ping") return handlePing(env);
   if (base === "/list") {
     return reply(
       "No /list command — there are too many songs to list, so it was left out on purpose.",
@@ -495,6 +509,56 @@ export async function handleCallbackQuery(env, chatId, callbackQuery) {
   return reply("Unknown button — send /help for commands.");
 }
 
+// --- Shared update handler ------------------------------------------------
+// One place, one behavior: used by the Workers webhook (fetch below) and
+// by the Node long-polling entry point (src/polling.js). It answers the
+// update and sends/edits the reply; it never returns an HTTP response.
+
+export async function handleUpdate(env, update) {
+  if (!update || typeof update !== "object") return;
+
+  if (update.callback_query) {
+    const cq = update.callback_query;
+    const chatId = cq.message?.chat?.id ?? cq.from?.id;
+    if (String(chatId) !== ALLOWED_CHAT_ID) return;
+    await answerCallbackQuery(env, cq.id, "");
+    const result = await handleCallbackQuery(env, chatId, cq);
+    // Edit the message the button was on, so the chat does not fill up.
+    if (env.TELEGRAM_BOT_TOKEN && cq.message?.message_id) {
+      try {
+        await httpFetch(
+          env,
+          `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              message_id: cq.message.message_id,
+              text: result.text,
+              ...(result.replyMarkup ? { reply_markup: result.replyMarkup } : {}),
+            }),
+          },
+        );
+      } catch (e) {
+        console.log("[telegram] edit failed:", e.message);
+        await sendTelegram(env, chatId, result.text, result.replyMarkup);
+      }
+    } else {
+      await sendTelegram(env, chatId, result.text, result.replyMarkup);
+    }
+    return;
+  }
+
+  const message = update.message;
+  if (!message || typeof message.text !== "string") return;
+  const chatId = message.chat?.id;
+  if (String(chatId) !== ALLOWED_CHAT_ID) return;
+
+  const result = await handleCommand(env, chatId, message.text);
+  await sendTelegram(env, chatId, result.text, result.replyMarkup);
+}
+
 // --- Worker entry ---------------------------------------------------------
 
 export default {
@@ -516,45 +580,6 @@ export default {
       return new Response("OK", { status: 200 });
     }
 
-    if (update.callback_query) {
-      const cq = update.callback_query;
-      const chatId = cq.message?.chat?.id ?? cq.from?.id;
-      if (String(chatId) !== ALLOWED_CHAT_ID) return new Response("OK", { status: 200 });
-      await answerCallbackQuery(env, cq.id, "");
-      const result = await handleCallbackQuery(env, chatId, cq);
-      // Edit the message the button was on, so the chat does not fill up.
-      if (env.TELEGRAM_BOT_TOKEN && cq.message?.message_id) {
-        try {
-          await fetch(
-            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                chat_id: chatId,
-                message_id: cq.message.message_id,
-                text: result.text,
-                ...(result.replyMarkup ? { reply_markup: result.replyMarkup } : {}),
-              }),
-            },
-          );
-        } catch (e) {
-          console.log("[telegram] edit failed:", e.message);
-          await sendTelegram(env, chatId, result.text, result.replyMarkup);
-        }
-      } else {
-        await sendTelegram(env, chatId, result.text, result.replyMarkup);
-      }
-      return new Response("OK", { status: 200 });
-    }
-
-    const message = update.message;
-    if (!message || typeof message.text !== "string") {
-      return new Response("OK", { status: 200 });
-    }
-    const chatId = message.chat?.id;
-    if (String(chatId) !== ALLOWED_CHAT_ID) return new Response("OK", { status: 200 });
-
     if (env.TELEGRAM_WEBHOOK_SECRET) {
       const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
       if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
@@ -562,8 +587,7 @@ export default {
       }
     }
 
-    const result = await handleCommand(env, chatId, message.text);
-    await sendTelegram(env, chatId, result.text, result.replyMarkup);
+    await handleUpdate(env, update);
     return new Response("OK", { status: 200 });
   },
 };
