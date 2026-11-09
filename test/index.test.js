@@ -252,8 +252,115 @@ test("/status reports the last run from the GitHub API (stubbed)", async () => {
       chatId,
       "/status trending",
     );
-    assert.match(result.text, /completed \/ success/);
-    assert.match(result.text, /2026-11-09/);
+    assert.match(result.text, /success/);
+    assert.match(result.text, /Nov 9, 05:30/);
+    assert.match(result.text, /github\.com\/x\/y\/actions\/runs\/1/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("/runs with no saved bot asks to pick one", async () => {
+  const result = await handleCommand(env, chatId, "/runs");
+  assert.match(result.text, /pick a bot/);
+});
+
+test("/runs reports the last runs from the GitHub API (stubbed)", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /runs\?per_page=5/);
+    return new Response(
+      JSON.stringify({
+        workflow_runs: [
+          {
+            status: "completed",
+            conclusion: "success",
+            event: "schedule",
+            created_at: "2026-11-09T06:00:00Z",
+            updated_at: "2026-11-09T06:00:44Z",
+            html_url: "https://github.com/x/y/actions/runs/2",
+          },
+          {
+            status: "completed",
+            conclusion: "failure",
+            event: "workflow_dispatch",
+            created_at: "2026-11-08T17:47:00Z",
+            updated_at: "2026-11-08T17:47:55Z",
+            html_url: "https://github.com/x/y/actions/runs/1",
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await handleCommand(
+      { GITHUB_PAT: "fake-pat", BOT_KV: fakeKV() },
+      chatId,
+      "/runs trending",
+    );
+    assert.match(result.text, /Runs — Trending Phonk/);
+    assert.match(result.text, /✅ success/);
+    assert.match(result.text, /❌ failure/);
+    assert.match(result.text, /Scheduled/);
+    assert.match(result.text, /Manual/);
+    assert.match(result.text, /44s/);
+    assert.match(result.text, /55s/);
+    assert.match(result.text, /Nov 9, 11:30/);
+    assert.match(result.text, /github\.com\/x\/y\/actions\/runs\/2/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("/runs with no runs reports none", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(JSON.stringify({ workflow_runs: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const result = await handleCommand(
+      { GITHUB_PAT: "fake-pat", BOT_KV: fakeKV() },
+      chatId,
+      "/runs cool",
+    );
+    assert.match(result.text, /no runs yet/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("runs callback lists runs for the picked bot", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(
+      JSON.stringify({
+        workflow_runs: [
+          {
+            status: "completed",
+            conclusion: "success",
+            event: "workflow_dispatch",
+            created_at: "2026-11-09T06:00:00Z",
+            updated_at: "2026-11-09T06:00:32Z",
+            html_url: "https://github.com/x/y/actions/runs/3",
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await handleCallbackQuery(
+      { GITHUB_PAT: "fake-pat", BOT_KV: fakeKV() },
+      chatId,
+      { id: "cb7", data: "runs:trending", message: { chat: { id: chatId } } },
+    );
+    assert.match(result.text, /Runs — Trending Phonk/);
+    assert.match(result.text, /✅ success/);
+    assert.match(result.text, /32s/);
   } finally {
     globalThis.fetch = origFetch;
   }

@@ -37,7 +37,10 @@
 // dry_run (+ stats, not sent); Trending takes dry_run + reset_db;
 // scour takes dry_run (+ max_tracks / request_delay / free_search_pause,
 // not sent). reset_db is always "none" — never anything else.
-export const VERSION = "0.3.3";
+// v0.3.4 adds /runs: the last 5 workflow runs of the picked sync bot
+// (success / fail, when in Sri Lanka time, how long, Scheduled vs
+// Manual, run page link). /status stays as the latest run only.
+export const VERSION = "0.3.4";
 const ALLOWED_CHAT_ID = "7933991754";
 
 // Sync bots. Each workflow takes a `dry_run` boolean input on
@@ -86,6 +89,7 @@ const HELP_TEXT = [
   `/help — this list`,
   `/sync — pick a sync bot, then Dry run / Real run (real asks to confirm)`,
   `/status — last run of the picked sync bot (Added / Skipped / Failed is on the run page)`,
+  `/runs — last 5 runs of the picked sync bot (success / fail, when, how long)`,
   `/ping — basic reachability check (GitHub API + Telegram, from the Worker)`,
   `/github — GitHub service status (up / down, active incidents)`,
   `/next — next scheduled sync time (05:47 / 11:47 / 17:47 / 23:47)`,
@@ -402,13 +406,15 @@ async function dispatchSync(env, bot, dryRun) {
   }
 }
 
-async function lastRun(env, bot) {
+// Fetch the last `count` runs of a bot's workflow. Returns
+// { runs } or { error } — callers format the message.
+async function fetchRuns(env, bot, count) {
   if (!bot.repo || !bot.workflow) {
-    return `${bot.name} is not set up yet — its repo / workflow file is not known.`;
+    return { error: `${bot.name} is not set up yet — its repo / workflow file is not known.` };
   }
   const url =
     `https://api.github.com/repos/${bot.repo}/actions/workflows/` +
-    `${encodeURIComponent(bot.workflow)}/runs?per_page=1`;
+    `${encodeURIComponent(bot.workflow)}/runs?per_page=${count}`;
   try {
     const res = await httpFetch(env, url, {
       headers: githubHeaders(env),
@@ -416,27 +422,81 @@ async function lastRun(env, bot) {
     });
     if (!res.ok) {
       if (res.status === 404) {
-        return (
-          `Status: could not read ${bot.name} (${bot.repo}) — GitHub returned 404. ` +
-          `For a private repo this usually means GITHUB_PAT is missing or ` +
-          `cannot see that repo.`
-        );
+        return {
+          error:
+            `Could not read ${bot.name} (${bot.repo}) — GitHub returned 404. ` +
+            `For a private repo this usually means GITHUB_PAT is missing or ` +
+            `cannot see that repo.`,
+        };
       }
-      return `Status: GitHub API ${res.status} for ${bot.name}.`;
+      return { error: `GitHub API ${res.status} for ${bot.name}.` };
     }
     const data = await res.json();
-    const run = (data.workflow_runs || [])[0];
-    if (!run) return `Status: ${bot.name} — no runs yet.`;
-    const lines = [
-      `Status — ${bot.name} (${bot.repo}):`,
-      `- Run: ${run.status}${run.conclusion ? ` / ${run.conclusion}` : ""}`,
-      `- Started: ${run.created_at}`,
-      run.html_url ? `- Run page: ${run.html_url}` : null,
-    ].filter(Boolean);
-    return lines.join("\n");
+    return { runs: data.workflow_runs || [] };
   } catch (e) {
-    return `Status: ${bot.name} — error: ${e.message}`;
+    return { error: e.message || "fetch failed" };
   }
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// "2026-11-09T06:36:00Z" -> "Nov 9, 12:06" (Sri Lanka time, UTC+5:30).
+function formatColombo(iso) {
+  const d = new Date(new Date(iso).getTime() + 5.5 * 60 * 60 * 1000);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+function formatDuration(run) {
+  if (!run.updated_at) return "";
+  const start = new Date(run.created_at).getTime();
+  const end = new Date(run.updated_at).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "";
+  const s = Math.round((end - start) / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
+
+function runIcon(run) {
+  if (run.conclusion === "success") return "✅";
+  if (run.conclusion === "failure" || run.conclusion === "cancelled") return "❌";
+  if (run.status === "in_progress" || run.status === "queued" || run.status === "waiting") return "⏳";
+  return "•";
+}
+
+function runLine(run) {
+  const when = formatColombo(run.created_at);
+  const dur = formatDuration(run);
+  const how =
+    run.event === "schedule"
+      ? "Scheduled"
+      : run.event === "workflow_dispatch"
+        ? "Manual"
+        : run.event || "";
+  const parts = [
+    `${runIcon(run)} ${run.conclusion || run.status}`,
+    `— ${when}`,
+    dur ? `(${dur})` : null,
+    how ? `— ${how}` : null,
+  ].filter(Boolean);
+  return parts.join(" ") + (run.html_url ? `\n  ${run.html_url}` : "");
+}
+
+async function lastRun(env, bot) {
+  const { runs, error } = await fetchRuns(env, bot, 1);
+  if (error) return `Status: ${error}`;
+  if (runs.length === 0) return `Status: ${bot.name} — no runs yet.`;
+  const lines = [`Status — ${bot.name} (${bot.repo}):`, runLine(runs[0])];
+  return lines.join("\n");
+}
+
+// /runs: the last 5 runs, newest first.
+async function listRuns(env, bot) {
+  const { runs, error } = await fetchRuns(env, bot, 5);
+  if (error) return `Runs: ${error}`;
+  if (runs.length === 0) return `Runs: ${bot.name} — no runs yet.`;
+  const lines = [`Runs — ${bot.name} (${bot.repo}):`];
+  for (const run of runs) lines.push(runLine(run));
+  return lines.join("\n");
 }
 
 // --- Commands ------------------------------------------------------------
@@ -609,6 +669,21 @@ async function handleStatus(env, chatId, botArg) {
   return reply(await lastRun(env, bot));
 }
 
+async function handleRuns(env, chatId, botArg) {
+  const picked = botArg ? findBotByArg(botArg) : null;
+  if (botArg && !picked) {
+    return reply(
+      `Unknown bot "${botArg}". Pick one for runs:`,
+      botPickKeyboard("runs"),
+    );
+  }
+  const bot = picked || (await loadLastBot(env, chatId));
+  if (!bot) {
+    return reply("Runs — pick a bot first:", botPickKeyboard("runs"));
+  }
+  return reply(await listRuns(env, bot));
+}
+
 export async function handleCommand(env, chatId, text) {
   const cmd = (text || "").trim();
   const mapped = KEYBOARD_COMMANDS[cmd] || cmd;
@@ -626,6 +701,7 @@ export async function handleCommand(env, chatId, text) {
   }
   if (base === "/sync") return handleSync(env, chatId, arg);
   if (base === "/status") return handleStatus(env, chatId, arg);
+  if (base === "/runs") return handleRuns(env, chatId, arg);
   if (base === "/ping") return handlePing(env);
   if (base === "/github") return handleGithub(env);
   if (base === "/next") return handleNext();
@@ -645,10 +721,11 @@ export async function handleCallbackQuery(env, chatId, callbackQuery) {
   const parts = data.split(":");
   const kind = parts[0];
 
-  if (kind === "pick" || kind === "status") {
+  if (kind === "pick" || kind === "status" || kind === "runs") {
     const bot = findBot(parts[1]);
     if (!bot) return reply("Unknown button — send /sync to pick again.");
     await saveLastBot(env, chatId, bot);
+    if (kind === "runs") return reply(await listRuns(env, bot));
     if (kind === "status") return reply(await lastRun(env, bot));
     if (!bot.repo) {
       return reply(
